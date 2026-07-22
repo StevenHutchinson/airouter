@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { assertPublicUrl } from "@/shared/utils/ssrfGuard.js";
+import { isLocalRequest } from "@/dashboardGuard";
 
 // Fetch with timeout wrapper
 const fetchWithTimeout = (url, options, timeout = 10000) => {
@@ -62,6 +64,45 @@ export async function POST(request) {
     // Validate URL format
     if (!isValidUrl(baseUrl)) {
       return NextResponse.json({ error: "Invalid URL format" }, { status: 400 });
+    }
+
+    // SSRF guard for remote callers; local host keeps self-hosted nodes (e.g. ollama-local)
+    if (!isLocalRequest(request)) {
+      try {
+        assertPublicUrl(baseUrl);
+      } catch {
+        return NextResponse.json({ error: "URL not allowed" }, { status: 400 });
+      }
+    }
+
+    // Custom Embedding Validation - test POST /embeddings directly
+    if (type === "custom-embedding") {
+      const normalizedBase = baseUrl.trim().replace(/\/$/, "");
+      if (!modelId?.trim()) {
+        return NextResponse.json({ valid: false, error: "Model ID required for embedding validation" });
+      }
+      const embedRes = await fetchWithTimeout(`${normalizedBase}/embeddings`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ model: modelId.trim(), input: "ping" })
+      });
+      if (embedRes.ok) {
+        const data = await embedRes.json().catch(() => null);
+        const dims = Array.isArray(data?.data?.[0]?.embedding) ? data.data[0].embedding.length : null;
+        return NextResponse.json({ valid: true, method: "embeddings", dimensions: dims });
+      }
+      if (embedRes.status === 401 || embedRes.status === 403) {
+        return NextResponse.json({ valid: false, error: "API key unauthorized" });
+      }
+      const errBody = await embedRes.text().catch(() => "");
+      return NextResponse.json({
+        valid: false,
+        error: `Embeddings request failed (${embedRes.status})${errBody ? `: ${errBody.slice(0, 200)}` : ""}`,
+        method: "embeddings"
+      });
     }
 
     // Anthropic Compatible Validation

@@ -6,7 +6,8 @@ import Modal from "@/shared/components/Modal";
 import Input from "@/shared/components/Input";
 import Button from "@/shared/components/Button";
 import Badge from "@/shared/components/Badge";
-import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
+import Select from "@/shared/components/Select";
 
 export default function EditConnectionModal({ isOpen, connection, proxyPools, onSave, onClose }) {
   const [formData, setFormData] = useState({
@@ -14,6 +15,14 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     priority: 1,
     apiKey: "",
   });
+  const [azureData, setAzureData] = useState({
+    azureEndpoint: "",
+    apiVersion: "2024-10-01-preview",
+    deployment: "",
+    organization: "",
+  });
+  const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
+  const [region, setRegion] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [validating, setValidating] = useState(false);
@@ -27,15 +36,42 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
         priority: connection.priority || 1,
         apiKey: "",
       });
+      // Load Azure-specific data if present
+      if (connection.provider === "azure" && connection.providerSpecificData) {
+        setAzureData({
+          azureEndpoint: connection.providerSpecificData.azureEndpoint || "",
+          apiVersion: connection.providerSpecificData.apiVersion || "2024-10-01-preview",
+          deployment: connection.providerSpecificData.deployment || "",
+          organization: connection.providerSpecificData.organization || "",
+        });
+      }
+      if (connection.provider === "cloudflare-ai" && connection.providerSpecificData) {
+        setCloudflareData({ accountId: connection.providerSpecificData.accountId || "" });
+      }
+      // Load region for providers that support it (e.g. xiaomi-tokenplan)
+      const providerCfg = AI_PROVIDERS?.[connection.provider];
+      if (providerCfg?.regions) {
+        const savedRegion = connection.providerSpecificData?.region || providerCfg.defaultRegion || providerCfg.regions[0]?.id || "";
+        setRegion(savedRegion);
+      }
       setTestResult(null);
       setValidationResult(null);
     }
   }, [connection]);
 
   const isOAuth = connection?.authType === "oauth";
+  const isAzure = connection?.provider === "azure";
+  const isCloudflareAi = connection?.provider === "cloudflare-ai";
   const isCompatible = connection
     ? (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider))
     : false;
+  const providerRegions = connection ? (AI_PROVIDERS?.[connection.provider]?.regions || null) : null;
+
+  // Build providerSpecificData for region-aware providers
+  const buildRegionSpecificData = () => {
+    if (providerRegions && region) return { ...((connection?.providerSpecificData) || {}), region };
+    return undefined;
+  };
 
   const handleTest = async () => {
     if (!connection?.provider) return;
@@ -60,7 +96,13 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       const res = await fetch("/api/providers/validate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: connection.provider, apiKey: formData.apiKey }),
+        body: JSON.stringify({
+          provider: connection.provider,
+          apiKey: formData.apiKey,
+          ...(isAzure ? { providerSpecificData: azureData } : {}),
+          ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
+          ...(providerRegions ? { providerSpecificData: buildRegionSpecificData() } : {}),
+        }),
       });
       const data = await res.json();
       setValidationResult(data.valid ? "success" : "failed");
@@ -89,7 +131,13 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
             const res = await fetch("/api/providers/validate", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ provider: connection.provider, apiKey: formData.apiKey }),
+              body: JSON.stringify({
+                provider: connection.provider,
+                apiKey: formData.apiKey,
+                ...(isAzure ? { providerSpecificData: azureData } : {}),
+                ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
+                ...(providerRegions ? { providerSpecificData: buildRegionSpecificData() } : {}),
+              }),
             });
             const data = await res.json();
             isValid = !!data.valid;
@@ -106,6 +154,24 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           updates.lastErrorAt = null;
         }
       }
+      
+      // Add Azure-specific data if this is an Azure connection
+      if (isAzure) {
+        updates.providerSpecificData = {
+          azureEndpoint: azureData.azureEndpoint,
+          apiVersion: azureData.apiVersion,
+          deployment: azureData.deployment,
+          organization: azureData.organization,
+        };
+      }
+      if (isCloudflareAi) {
+        updates.providerSpecificData = { accountId: cloudflareData.accountId };
+      }
+      // Persist updated region for region-aware providers
+      if (providerRegions && region) {
+        updates.providerSpecificData = buildRegionSpecificData();
+      }
+      
       await onSave(updates);
     } finally {
       setSaving(false);
@@ -162,7 +228,52 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           </>
         )}
 
-        {!isCompatible && (
+        {isAzure && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
+            <h3 className="font-semibold mb-3 text-sm">Azure OpenAI Configuration</h3>
+            <div className="flex flex-col gap-3">
+              <Input
+                label="Azure Endpoint"
+                value={azureData.azureEndpoint}
+                onChange={(e) => setAzureData({ ...azureData, azureEndpoint: e.target.value })}
+                placeholder="https://your-resource.openai.azure.com"
+                hint="Your Azure OpenAI resource endpoint URL"
+              />
+              <Input
+                label="Deployment Name"
+                value={azureData.deployment}
+                onChange={(e) => setAzureData({ ...azureData, deployment: e.target.value })}
+                placeholder="gpt-4"
+                hint="The deployment name in your Azure resource"
+              />
+              <Input
+                label="API Version"
+                value={azureData.apiVersion}
+                onChange={(e) => setAzureData({ ...azureData, apiVersion: e.target.value })}
+                placeholder="2024-10-01-preview"
+                hint="Azure OpenAI API version to use"
+              />
+              <Input
+                label="Organization"
+                value={azureData.organization}
+                onChange={(e) => setAzureData({ ...azureData, organization: e.target.value })}
+                placeholder="Organization ID"
+                hint="Required for billing"
+              />
+            </div>
+          </div>
+        )}
+
+        {providerRegions && (
+          <Select
+            label="Region"
+            value={region}
+            onChange={(e) => setRegion(e.target.value)}
+            options={providerRegions.map((r) => ({ value: r.id, label: r.label }))}
+          />
+        )}
+
+        {!isCompatible && !isAzure && !isCloudflareAi && (
           <div className="flex items-center gap-3">
             <Button onClick={handleTest} variant="secondary" disabled={testing}>
               {testing ? "Testing..." : "Test Connection"}
@@ -202,3 +313,4 @@ EditConnectionModal.propTypes = {
   onSave: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
 };
+
